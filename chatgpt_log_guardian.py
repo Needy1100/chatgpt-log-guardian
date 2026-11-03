@@ -1,6 +1,4 @@
-"""Maintain ChatGPT desktop application logs and Codex diagnostic SQLite logs."""
-
-from __future__ import annotations
+"""Maintain local ChatGPT and Codex diagnostic logs."""
 
 import json
 import contextlib
@@ -34,7 +32,22 @@ DESKTOP_TARGET_BYTES = 50 * 1024 * 1024
 DESKTOP_KEEP_DAYS = 7
 
 
-def open_inactive_log(path: pathlib.Path):
+def report(**values):
+    print(json.dumps(values, ensure_ascii=True))
+
+
+def digest_stream(source, deadline, destination=None):
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("desktop backup deadline exceeded")
+        if destination is not None:
+            destination.write(chunk)
+        digest.update(chunk)
+    return digest.digest()
+
+
+def open_inactive_log(path):
     """Deny writers while reading/deleting; an existing writer makes this fail."""
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     create = kernel.CreateFileW
@@ -53,7 +66,7 @@ def open_inactive_log(path: pathlib.Path):
     return os.fdopen(fd, "rb")
 
 
-def maintain_desktop_logs() -> dict:
+def maintain_desktop_logs():
     for artifact in DESKTOP_BACKUP.parent.glob(DESKTOP_BACKUP.stem + ".*.zip.tmp"):
         artifact.unlink()
     today = datetime.now(timezone.utc).date()
@@ -102,13 +115,7 @@ def maintain_desktop_logs() -> dict:
                         skipped += 1
                         continue
                     with source, archive.open(str(len(snapshots)) + "/" + relative.as_posix(), "w") as destination:
-                        digest = hashlib.sha256()
-                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                            if time.monotonic() >= deadline:
-                                raise TimeoutError("desktop backup deadline exceeded")
-                            destination.write(chunk)
-                            digest.update(chunk)
-                        snapshots.append((path, digest.digest()))
+                        snapshots.append((path, digest_stream(source, deadline, destination)))
             if snapshots:
                 with zipfile.ZipFile(temporary) as verify:
                     if verify.testzip() is not None:
@@ -120,10 +127,7 @@ def maintain_desktop_logs() -> dict:
                 for path, expected in snapshots:
                     try:
                         with open_inactive_log(path) as source:
-                            digest = hashlib.sha256()
-                            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                                digest.update(chunk)
-                            if digest.digest() != expected:
+                            if digest_stream(source, deadline) != expected:
                                 skipped += 1
                                 continue
                             path.unlink()
@@ -138,19 +142,18 @@ def maintain_desktop_logs() -> dict:
             "deleted_files": deleted, "skipped_files": skipped, "backup": backup}
 
 
-def stats(connection: sqlite3.Connection) -> tuple[int, int]:
+def stats(connection):
     return connection.execute(
         "SELECT COUNT(*), COALESCE(SUM(estimated_bytes), 0) FROM logs"
     ).fetchone()
 
 
-def file_bytes(path: pathlib.Path) -> int:
+def file_bytes(path):
     return path.stat().st_size if path.exists() else 0
 
 
 @contextlib.contextmanager
-def run_lock(directory: pathlib.Path):
-    """Hold a one-byte Windows lock so scheduled runs cannot overlap."""
+def run_lock(directory):
     directory.mkdir(parents=True, exist_ok=True)
     lock_path = directory / "codex-log-guardian.lock"
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_BINARY)
@@ -170,8 +173,7 @@ def run_lock(directory: pathlib.Path):
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def cleanup_orphaned_backup_artifacts(directory: pathlib.Path, backup: pathlib.Path) -> int:
-    """Remove only this guardian's leftover temp/journal files."""
+def cleanup_backup_temps(directory, backup):
     removed = 0
     pattern = backup.stem + ".*.sqlite.tmp*"
     for candidate in directory.glob(pattern):
@@ -181,12 +183,12 @@ def cleanup_orphaned_backup_artifacts(directory: pathlib.Path, backup: pathlib.P
     return removed
 
 
-def backup_integrity(path: pathlib.Path) -> str:
+def backup_integrity(path):
     with closing(sqlite3.connect(path)) as connection:
         return connection.execute("PRAGMA integrity_check").fetchone()[0]
 
 
-def make_consistent_backup() -> str:
+def make_consistent_backup():
     deadline = time.monotonic() + BACKUP_TIMEOUT_SECONDS
 
     def check_deadline(*_):
@@ -213,13 +215,12 @@ def make_consistent_backup() -> str:
     finally:
         for suffix in ("", "-journal", "-wal", "-shm"):
             artifact = temp_path.with_name(temp_path.name + suffix)
-            if artifact.exists():
-                artifact.unlink()
+            artifact.unlink(missing_ok=True)
 
 
-def _run_once() -> int:
+def _run_once():
     if not DB.exists():
-        print(json.dumps({"status": "missing_database"}))
+        report(status="missing_database")
         return 0
 
     before_db = file_bytes(DB)
@@ -235,26 +236,19 @@ def _run_once() -> int:
             physical_before = before_db + before_wal
 
             if BACKUP.exists() and backup_integrity(BACKUP) == "ok":
-                removed_artifacts = cleanup_orphaned_backup_artifacts(BACKUP.parent, BACKUP)
+                removed_artifacts = cleanup_backup_temps(BACKUP.parent, BACKUP)
 
             if before_estimated > TARGET_ESTIMATED_BYTES or physical_before > PHYSICAL_CAP_BYTES:
                 backup_path = make_consistent_backup()
-                removed_artifacts = cleanup_orphaned_backup_artifacts(BACKUP.parent, BACKUP)
+                removed_artifacts = cleanup_backup_temps(BACKUP.parent, BACKUP)
 
             if before_estimated > TARGET_ESTIMATED_BYTES:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
-                    """
-                    WITH ranked AS (
-                        SELECT id, SUM(estimated_bytes) OVER (
-                            ORDER BY ts DESC, ts_nanos DESC, id DESC
-                        ) AS kept_bytes
-                        FROM logs
-                    )
-                    DELETE FROM logs WHERE id IN (
-                        SELECT id FROM ranked WHERE kept_bytes > ?
-                    )
-                    """,
+                    "WITH ranked AS (SELECT id, SUM(estimated_bytes) OVER ("
+                    "ORDER BY ts DESC, ts_nanos DESC, id DESC) AS kept_bytes FROM logs) "
+                    "DELETE FROM logs WHERE id IN "
+                    "(SELECT id FROM ranked WHERE kept_bytes > ?)",
                     (TARGET_ESTIMATED_BYTES,),
                 )
                 deleted = connection.execute("SELECT changes()").fetchone()[0]
@@ -282,35 +276,32 @@ def _run_once() -> int:
             "backup": backup_path,
             "removed_orphaned_backup_artifacts": removed_artifacts,
         }
-        print(json.dumps(result, ensure_ascii=True))
+        report(**result)
         return 2 if integrity != "ok" else (3 if checkpoint_busy else 0)
     except (sqlite3.OperationalError, TimeoutError) as error:
         if BACKUP.exists():
             try:
                 if backup_integrity(BACKUP) == "ok":
-                    removed_artifacts = cleanup_orphaned_backup_artifacts(BACKUP.parent, BACKUP)
+                    removed_artifacts = cleanup_backup_temps(BACKUP.parent, BACKUP)
             except sqlite3.Error:
                 pass
-        print(json.dumps({
-            "status": "backup_timeout" if isinstance(error, TimeoutError) else "busy_or_unavailable",
-            "error_type": type(error).__name__,
-            "removed_orphaned_backup_artifacts": removed_artifacts,
-        }))
+        report(status="backup_timeout" if isinstance(error, TimeoutError) else "busy_or_unavailable",
+               error_type=type(error).__name__, removed_orphaned_backup_artifacts=removed_artifacts)
         return 3
 
 
-def main() -> int:
+def main():
     with run_lock(BACKUP.parent) as acquired:
         if not acquired:
-            print(json.dumps({"status": "already_running"}))
+            report(status="already_running")
             return 0
         database_result = _run_once()
         try:
             desktop = maintain_desktop_logs()
-            print(json.dumps(desktop, ensure_ascii=True))
+            report(**desktop)
             return database_result or (3 if desktop["status"] == "busy" else 0)
         except (OSError, RuntimeError, zipfile.BadZipFile) as error:
-            print(json.dumps({"component": "desktop_logs", "status": "failed", "error_type": type(error).__name__}))
+            report(component="desktop_logs", status="failed", error_type=type(error).__name__)
             return database_result or 3
 
 

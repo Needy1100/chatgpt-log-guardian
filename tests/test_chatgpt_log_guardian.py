@@ -181,7 +181,7 @@ class GuardianTests(unittest.TestCase):
             stale.write_bytes(b"partial")
             stale_journal.write_bytes(b"partial")
 
-            removed = guardian.cleanup_orphaned_backup_artifacts(tmp_path, backup)
+            removed = guardian.cleanup_backup_temps(tmp_path, backup)
 
             self.assertEqual(removed, 2)
             self.assertTrue(backup.exists())
