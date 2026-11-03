@@ -1,8 +1,8 @@
 # ChatGPT Log Guardian
 
-清理 Windows 上 ChatGPT 桌面端的旧诊断日志，减少磁盘占用，清理前自动备份。
+## 清理 ChatGPT 日志，帮助节省磁盘空间
 
-同时维护 ChatGPT / Codex 两种模式共用的桌面日志，以及 Codex 的诊断数据库。需要 Windows 和 Python 3.10+，无需第三方依赖。
+适用于 Windows 桌面端，清理前自动备份。
 
 ## 怎么用
 
