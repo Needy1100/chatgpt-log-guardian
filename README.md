@@ -1,2 +1,168 @@
-# codex-log-guardian
-A safe Windows utility for backing up, pruning, and maintaining Codex SQLite logs with bounded disk usage.
+# ChatGPT Log Guardian
+
+一个轻量的 Windows ChatGPT 桌面端诊断日志维护脚本，面向其 Codex 功能产生的本地日志：清理前生成一致性备份，保留最新日志，并尝试回收数据库和 WAL 空间。仅使用 Python 标准库，不输出日志正文，不发送网络请求。
+
+当前维护版：**[v1.1.0](https://github.com/Needy1100/chatgpt-log-guardian/releases/tag/v1.1.0)**。脚本约 7 KiB，无需安装第三方依赖。
+
+**想让 ChatGPT 帮你配置？** 下方提供可直接复制的部署提示词，包含路径检查、计划任务配置和运行验证。
+
+## 让 ChatGPT 帮你部署
+
+将以下整段提示词发给**具备本机文件和终端操作权限**的 ChatGPT/Codex。普通网页版如果没有连接本机执行工具，无法直接修改电脑，只能按提示词提供指导。下载脚本本身不会自动安装任务。
+
+```text
+请帮我在这台 Windows 电脑上部署 ChatGPT Log Guardian：
+https://github.com/Needy1100/chatgpt-log-guardian
+
+请先读取该仓库当前 README、脚本和最新 Release，不要只根据项目简介判断兼容性。
+我希望每 30 分钟维护一次 Codex 诊断日志，默认阈值保持 50 MiB / 120 MiB。
+
+请按以下步骤执行：
+1. 检查当前用户、Windows Python 和实际日志库位置，包括 CODEX_HOME、
+   CODEX_SQLITE_HOME 或 sqlite_home 是否改变路径。只检查数据库结构和统计，
+   不打印日志正文。确认目标确实是 Codex 诊断库，logs 表包含所需字段。
+   如果找不到正确日志库、结构不兼容或权限不足，停止配置并说明原因。
+2. 将最新正式版脚本放在固定、可写的用户目录，告诉我具体路径。
+   优先使用稳定安装的 Python，不依赖可能随应用更新清理的临时缓存目录。
+   公开版支持 CODEX_HOME；若 SQLite 单独迁移，只调整 DB 到已核实的日志路径。
+   不修改 Windows 系统文件、注册表、驱动、代理、ChatGPT 配置或聊天/记忆存储。
+3. 在清理前确认脚本会创建并校验一致性备份，继续保留一个可恢复主备份。
+   使用独立数据库运行仓库测试，再手动运行一次实际维护。
+   如果 missing_database、checkpoint_busy、backup_timeout 或报错，不要宣称维护成功。
+4. 配置名称为 Codex Log Maintenance 的当前用户计划任务，每 30 分钟运行一次；
+   不创建重复任务，不使用 SYSTEM 账户，不开启最高权限，不创建后台服务。
+   使用 Python 可执行文件和脚本的完整路径，正确引用带空格的参数；
+   多实例策略为不启动新实例，整体运行时限设为 5 分钟。
+   仅在确认现有同名任务确属本项目时更新它，不改其他任务。
+   遇到平台权限审批时按平台流程申请，不绕过限制。
+5. 回读计划任务的命令、参数、周期和状态，核对运行结果、备份完整性、
+   临时备份数量和锁文件大小。只报告路径、文件大小、统计和验证摘要；
+   不上传任何日志、数据库、备份或凭据。
+6. 最后告诉我如何查看任务、暂停自动维护、恢复运行，以及卸载任务。
+   暂停或卸载任务时默认保留日志和备份，删除这些文件前另行说明。
+
+请先列出简短计划并保存为独立 Markdown 文件，然后完成配置和验证。
+如果当前聊天没有本机执行能力，请明确说明，并给我可在 PowerShell 手动执行的步骤；
+不要声称已经在我的电脑上完成部署。
+```
+
+### 后续维护提示词
+
+ChatGPT/Codex 大版本更新后可发送：
+
+```text
+请只读复查 ChatGPT Log Guardian 的兼容性：核对实际日志库位置和 logs 表字段、
+Python 路径、每 30 分钟计划任务及最近运行结果。确认脚本维护的是当前版本使用的库，
+不要仅凭任务退出码 0 判断成功。只输出路径、大小与验证摘要，不打印日志正文；
+发现不兼容时先说明，不要直接改成清理其他数据库。
+```
+
+需要暂停时可发送：
+
+```text
+请确认 Codex Log Maintenance 是本项目的任务，然后暂停该计划任务并回读验证。
+如果已有本项目维护进程在运行，报告状态，不要把“任务已禁用”说成“进程已停止”。
+保留脚本、所有诊断日志和备份，不删除文件、不改动其他任务。
+```
+
+## 它解决什么问题
+
+Codex 本地诊断日志及临时备份可能持续占用磁盘。脚本按阈值维护 `logs_2.sqlite`，通过 Windows 文件锁防止维护进程重叠，使用 SQLite backup 接口生成可校验的备份，并清理自身遗留的临时备份。
+
+它是周期维护工具，**不是实时硬限额，也不是聊天历史或记忆的备份工具**。它不会阻止 Codex 继续产生诊断日志。
+
+## 环境要求与路径
+
+- Windows，Python 3.10 或更新版本；本机验证环境为 Python 3.12.14。
+- 使用 Windows 专有的 `msvcrt` 文件锁，不支持直接在 Linux、macOS 或 WSL 的 Linux Python 中运行。
+- 默认日志库：当前用户的 `%USERPROFILE%\.codex\logs_2.sqlite`。
+- 设置了 `CODEX_HOME` 时，使用该目录下的 `logs_2.sqlite`。
+- 主备份和锁文件：放在脚本所在目录，该目录必须可写。
+
+若通过 `sqlite_home` 或 `CODEX_SQLITE_HOME` 把数据库迁到其他位置，需要手动调整脚本顶部的 `DB`；本脚本不会解析 Codex 配置文件，也不会自动识别未来的新日志库名称。数据库不存在时返回 `missing_database`，不会自动寻找或创建另一个日志库。
+
+## 下载与运行
+
+从 [Releases](https://github.com/Needy1100/chatgpt-log-guardian/releases) 下载 `chatgpt_log_guardian.py`，放入固定的可写目录。在 PowerShell 中执行：
+
+```powershell
+py -3 .\chatgpt_log_guardian.py
+```
+
+也可以从源码运行：
+
+```powershell
+git clone https://github.com/Needy1100/chatgpt-log-guardian.git
+Set-Location chatgpt-log-guardian
+py -3 .\chatgpt_log_guardian.py
+```
+
+每次运行只进行一轮维护，处理完即退出。**首次运行前请确认 `DB` 指向 Codex 的诊断日志库**，不要把它改成其他数据库。
+
+### 可选：每 30 分钟运行
+
+脚本本身不安装后台服务、不创建自启动项或计划任务。需要自动维护时，可在 Windows“任务计划程序”中手动创建任务：
+
+1. 使用当前用户，设置每 30 分钟重复运行。
+2. 程序填写稳定安装的 `python.exe` 或 `pythonw.exe` 的完整路径；参数填写带双引号的脚本完整路径，例如 `"D:\Tools\chatgpt-log-guardian\chatgpt_log_guardian.py"`。
+3. 多实例策略选择“不启动新实例”。根据实际磁盘速度设置任务整体运行时限，例如 5 分钟；强制结束可能留下临时文件，下次运行在确认有效备份后会尝试清理。
+4. 初次排错优先用 `python.exe` 手动运行以查看 JSON 摘要；`pythonw.exe` 不显示控制台。
+
+旧脚本 `codex_log_guardian.py` 现更名为 `chatgpt_log_guardian.py`。升级时检查任务仍指向正确的脚本及 Python，避免旧、新脚本重复运行。为兼容旧部署，默认备份名 `codex-log-backup-latest.sqlite`、锁文件名 `codex-log-guardian.lock` 和任务示例名 `Codex Log Maintenance` 保持不变。此处是配置说明，不会在下载或测试时自动创建任务。
+
+## 默认策略
+
+| 项目 | 默认行为 |
+| --- | --- |
+| 日志估算量超过 50 MiB | 先备份，再按时间从新到旧保留预算内日志，删除较旧记录 |
+| 数据库与 WAL 合计超过 120 MiB | 先备份，再尝试 `VACUUM` 压缩 |
+| 备份 | 固定一个 `codex-log-backup-latest.sqlite`，新备份完整性通过后原子替换旧备份 |
+| 备份超时 | 分页检查 30 秒截止时间；超时不进入删除阶段，保留原备份 |
+| 运行冲突 | 获取不到维护锁时返回 `already_running` |
+| WAL 回收 | 调用 SQLite checkpoint；忙时报告 `checkpoint_busy`，不当作成功 |
+| 临时文件 | 仅清理本脚本命名模式下的临时备份；不会手动删除活动日志库的 WAL/SHM |
+
+50 MiB 是 `estimated_bytes` 的累计预算，不是数据库文件大小。120 MiB 是触发维护的阈值，不是磁盘硬上限。备份和压缩还需要临时空间；单份备份也可能超过这个阈值。
+
+30 秒截止检查发生在备份分页回调及校验边界，不是操作系统级精确中断，也不是整个脚本的总运行时限。
+
+## 输出与退出码
+
+只输出 JSON 状态、条数、文件大小、时间及完整性摘要；不会打印诊断日志正文。摘要可能包含本机备份路径，公开分享前仍应检查。
+
+| 状态 | 说明 | 退出码 |
+| --- | --- | --- |
+| `ok` | 本轮维护及完整性检查正常 | 0 |
+| `already_running` | 已有维护实例，本次跳过 | 0 |
+| `missing_database` | 配置路径不存在，本次跳过，不代表已维护成功 | 0 |
+| `checkpoint_busy` | WAL 回收遇到其他读者或写者，本轮未完成回收 | 3 |
+| `backup_timeout` | 备份超过截止时间，跳过本轮删除 | 3 |
+| `busy_or_unavailable` | SQLite 操作失败，例如繁忙、权限不足或表结构不兼容 | 3 |
+
+最终活动库完整性检查未通过时退出码为 2。其他未处理异常可能以非零码退出，应查看本地错误摘要，不能只看是否有备份文件。`busy_or_unavailable` 不等于一定只是“忙”，需要同时核对路径、权限和版本兼容性。
+
+## 安全与隐私边界
+
+- 不修改 Windows 系统目录、注册表、引导文件、驱动、网络配置或 ChatGPT 程序文件。
+- 删除语句只针对指定诊断数据库的 `logs` 表，不主动操作正式聊天历史、长期记忆、项目文件或附件的存储。
+- 诊断日志可能包含请求、文本和工具调用的片段或副本，备份应按敏感文件保管。删除日志会减少故障排查线索，不能把它当成完全无用的数据。
+- 备份是最近一次超限维护前的快照，不是连续归档。后续维护会替换它，不能保证永久找回任意历史诊断记录；需要长期保留时应先暂停任务并另行归档。
+- 不要在应用运行时直接删除活动数据库的 `-wal`、`-shm` 文件。恢复备份前应退出使用该数据库的应用并保留当前文件，不能直接覆盖运行中的库。
+
+普通检查短暂使用 CPU、内存和磁盘；超限后的备份和压缩开销更大。没有严格的 CPU、内存或整轮执行时间上限，数据库锁竞争可能影响桌面端诊断写入，不能承诺任何负载下都零卡顿。脚本不发送网络请求，但系统资源竞争仍可能间接影响其他程序。
+
+## 升级兼容性
+
+ChatGPT/Codex 更新后不保证所有未来版本兼容。大版本更新后，检查日志库路径、`logs` 表结构、Python 路径及计划任务。尤其要确认脚本处理的是新版实际使用的日志库，而不只是成功处理了旧文件。
+
+## 测试
+
+在 Windows 中运行：
+
+```powershell
+py -3 -m unittest discover -s tests -p "test_*.py" -v
+```
+
+测试使用独立的临时测试数据库，覆盖清理前备份、最新记录保留、其他表保持不变、锁互斥与固定大小、备份超时、WAL 繁忙报告、删除条数及公开路径。不会运行维护逻辑去清理你的真实日志库。
+
+历史变更见 [CHANGELOG.md](CHANGELOG.md)，发布说明见 [Releases](https://github.com/Needy1100/chatgpt-log-guardian/releases)。许可证：[MIT](LICENSE)。

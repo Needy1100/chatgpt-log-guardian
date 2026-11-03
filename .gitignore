@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local Codex diagnostic data and guardian runtime artifacts
+*.sqlite*
+codex-log-backup-*/
+codex-log-guardian.lock
+tests/.guardian-*/
+release-assets/
