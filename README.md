@@ -2,7 +2,7 @@
 
 清理 Windows 上 ChatGPT 桌面端的旧诊断日志，减少磁盘占用，清理前自动备份。
 
-适用于桌面端中的 Codex 功能。需要 Windows 和 Python 3.10+，无需第三方依赖。
+同时维护 ChatGPT / Codex 两种模式共用的桌面日志，以及 Codex 的诊断数据库。需要 Windows 和 Python 3.10+，无需第三方依赖。
 
 ## 怎么用
 

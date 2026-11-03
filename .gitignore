@@ -223,3 +223,4 @@ codex-log-backup-*/
 codex-log-guardian.lock
 tests/.guardian-*/
 release-assets/
+desktop-log-backup-*.zip*

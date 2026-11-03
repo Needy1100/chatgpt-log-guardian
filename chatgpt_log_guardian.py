@@ -1,9 +1,11 @@
-"""Maintain ChatGPT's local Codex diagnostic logs without printing their contents."""
+"""Maintain ChatGPT desktop application logs and Codex diagnostic SQLite logs."""
 
 from __future__ import annotations
 
 import json
 import contextlib
+import ctypes
+import hashlib
 import msvcrt
 import os
 import pathlib
@@ -11,6 +13,8 @@ import sqlite3
 import sys
 import tempfile
 import time
+import zipfile
+from ctypes import wintypes
 from contextlib import closing
 from datetime import datetime, timezone
 
@@ -20,6 +24,118 @@ BACKUP = pathlib.Path(__file__).resolve().with_name("codex-log-backup-latest.sql
 TARGET_ESTIMATED_BYTES = 50 * 1024 * 1024
 PHYSICAL_CAP_BYTES = 120 * 1024 * 1024
 BACKUP_TIMEOUT_SECONDS = 30
+LOCAL_DATA = pathlib.Path(os.environ.get("LOCALAPPDATA") or pathlib.Path.home() / "AppData" / "Local")
+DESKTOP_LOG_ROOTS = (
+    LOCAL_DATA / "Codex" / "Logs",
+    LOCAL_DATA / "Packages" / "OpenAI.Codex_2p2nqsd0c76g0" / "LocalCache" / "Local" / "Codex" / "Logs",
+)
+DESKTOP_BACKUP = BACKUP.with_name("desktop-log-backup-latest.zip")
+DESKTOP_TARGET_BYTES = 50 * 1024 * 1024
+DESKTOP_KEEP_DAYS = 7
+
+
+def open_inactive_log(path: pathlib.Path):
+    """Deny writers while reading/deleting; an existing writer makes this fail."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    handle = create(str(path), 0x80000000, 1 | 4, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except Exception:
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle(handle)
+        raise
+    return os.fdopen(fd, "rb")
+
+
+def maintain_desktop_logs() -> dict:
+    for artifact in DESKTOP_BACKUP.parent.glob(DESKTOP_BACKUP.stem + ".*.zip.tmp"):
+        artifact.unlink()
+    today = datetime.now(timezone.utc).date()
+    files, seen = [], set()
+    for root in DESKTOP_LOG_ROOTS:
+        for path in root.glob("*/*/*/codex-desktop-*.log"):
+            relative = path.relative_to(root)
+            try:
+                day = datetime.strptime(relative.parent.as_posix(), "%Y/%m/%d").date()
+                # Never follow a junction/symlink into browser storage or another directory.
+                if any(getattr(p.lstat(), "st_file_attributes", 0) & 0x400
+                       for p in (root, path, *list(path.parents)[:3])):
+                    continue
+                stat = path.stat()
+                identity = (stat.st_dev, stat.st_ino)
+                if not path.is_file() or identity in seen:
+                    continue
+                seen.add(identity)
+                files.append((stat.st_mtime, stat.st_size, path, day, relative))
+            except (OSError, ValueError):
+                continue
+    total = sum(item[1] for item in files)
+    remaining = total
+    candidates = []
+    for item in sorted(files, key=lambda item: item[0]):
+        mtime, size, path, day, relative = item
+        if day >= today or time.time() - mtime < 86400:
+            continue
+        if (today - day).days > DESKTOP_KEEP_DAYS or remaining > DESKTOP_TARGET_BYTES:
+            candidates.append(item)
+            remaining -= size
+    deleted = skipped = 0
+    backup = None
+    if candidates:
+        deadline = time.monotonic() + BACKUP_TIMEOUT_SECONDS
+        fd, name = tempfile.mkstemp(prefix=DESKTOP_BACKUP.stem + ".", suffix=".zip.tmp", dir=DESKTOP_BACKUP.parent)
+        os.close(fd)
+        temporary = pathlib.Path(name)
+        snapshots = []
+        try:
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for _, _, path, _, relative in candidates:
+                    try:
+                        source = open_inactive_log(path)
+                    except OSError:
+                        skipped += 1
+                        continue
+                    with source, archive.open(str(len(snapshots)) + "/" + relative.as_posix(), "w") as destination:
+                        digest = hashlib.sha256()
+                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError("desktop backup deadline exceeded")
+                            destination.write(chunk)
+                            digest.update(chunk)
+                        snapshots.append((path, digest.digest()))
+            if snapshots:
+                with zipfile.ZipFile(temporary) as verify:
+                    if verify.testzip() is not None:
+                        raise RuntimeError("desktop backup integrity check failed")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("desktop backup deadline exceeded")
+                os.replace(temporary, DESKTOP_BACKUP)
+                backup = str(DESKTOP_BACKUP)
+                for path, expected in snapshots:
+                    try:
+                        with open_inactive_log(path) as source:
+                            digest = hashlib.sha256()
+                            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                                digest.update(chunk)
+                            if digest.digest() != expected:
+                                skipped += 1
+                                continue
+                            path.unlink()
+                            deleted += 1
+                    except OSError:
+                        skipped += 1
+        finally:
+            temporary.unlink(missing_ok=True)
+    after = sum(file_bytes(item[2]) for item in files)
+    return {"component": "desktop_logs", "status": "busy" if skipped else "ok",
+            "files": len(files), "before_bytes": total, "after_bytes": after,
+            "deleted_files": deleted, "skipped_files": skipped, "backup": backup}
 
 
 def stats(connection: sqlite3.Connection) -> tuple[int, int]:
@@ -89,9 +205,8 @@ def make_consistent_backup() -> str:
             with closing(sqlite3.connect(temp_path)) as destination:
                 source.backup(destination, pages=128, progress=check_deadline, sleep=0.1)
             check_deadline()
-            with closing(sqlite3.connect(temp_path)) as verify:
-                if verify.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise RuntimeError("backup integrity check failed")
+            if backup_integrity(temp_path) != "ok":
+                raise RuntimeError("backup integrity check failed")
         check_deadline()
         os.replace(temp_path, BACKUP)
         return str(BACKUP)
@@ -131,14 +246,14 @@ def _run_once() -> int:
                 connection.execute(
                     """
                     WITH ranked AS (
-                        SELECT id,
-                               SUM(estimated_bytes) OVER (
-                                   ORDER BY ts DESC, ts_nanos DESC, id DESC
-                               ) AS kept_bytes
+                        SELECT id, SUM(estimated_bytes) OVER (
+                            ORDER BY ts DESC, ts_nanos DESC, id DESC
+                        ) AS kept_bytes
                         FROM logs
                     )
-                    DELETE FROM logs
-                    WHERE id IN (SELECT id FROM ranked WHERE kept_bytes > ?)
+                    DELETE FROM logs WHERE id IN (
+                        SELECT id FROM ranked WHERE kept_bytes > ?
+                    )
                     """,
                     (TARGET_ESTIMATED_BYTES,),
                 )
@@ -189,7 +304,14 @@ def main() -> int:
         if not acquired:
             print(json.dumps({"status": "already_running"}))
             return 0
-        return _run_once()
+        database_result = _run_once()
+        try:
+            desktop = maintain_desktop_logs()
+            print(json.dumps(desktop, ensure_ascii=True))
+            return database_result or (3 if desktop["status"] == "busy" else 0)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as error:
+            print(json.dumps({"component": "desktop_logs", "status": "failed", "error_type": type(error).__name__}))
+            return database_result or 3
 
 
 if __name__ == "__main__":

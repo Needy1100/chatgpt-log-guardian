@@ -21,6 +21,11 @@ SPEC.loader.exec_module(guardian)
 
 
 class GuardianTests(unittest.TestCase):
+    def setUp(self):
+        isolation = patch.object(guardian, "DESKTOP_LOG_ROOTS", (), create=True)
+        isolation.start()
+        self.addCleanup(isolation.stop)
+
     def test_backup_supports_special_characters_in_database_path(self):
         tmp_path = SCRIPT.parent / "tests" / ".guardian-test-uri"
         source_directory = tmp_path / "source # folder"
@@ -70,8 +75,8 @@ class GuardianTests(unittest.TestCase):
             with patch.multiple(guardian, DB=database, BACKUP=backup, TARGET_ESTIMATED_BYTES=30), contextlib.redirect_stdout(output):
                 result = guardian.main()
             self.assertEqual(result, 0)
-            self.assertEqual(json.loads(output.getvalue())["status"], "ok")
-            self.assertEqual(json.loads(output.getvalue())["deleted_rows"], 2)
+            self.assertEqual(json.loads(output.getvalue().splitlines()[0])["status"], "ok")
+            self.assertEqual(json.loads(output.getvalue().splitlines()[0])["deleted_rows"], 2)
             with contextlib.closing(sqlite3.connect(database)) as connection:
                 self.assertEqual(connection.execute("SELECT id FROM logs ORDER BY id").fetchall(), [(3,)])
                 self.assertEqual(connection.execute("SELECT value FROM unrelated").fetchall(), [("keep",)])
@@ -130,7 +135,7 @@ class GuardianTests(unittest.TestCase):
                 output = io.StringIO()
                 with patch.multiple(guardian, DB=database, BACKUP=tmp_path / "backup.sqlite"), contextlib.redirect_stdout(output):
                     result = guardian.main()
-                summary = json.loads(output.getvalue())
+                summary = json.loads(output.getvalue().splitlines()[0])
                 self.assertEqual(summary["status"], "checkpoint_busy")
                 self.assertEqual(summary["checkpoint_status"], "busy")
                 self.assertEqual(result, 3)
@@ -156,7 +161,7 @@ class GuardianTests(unittest.TestCase):
             with patch.multiple(guardian, DB=database, BACKUP=backup, TARGET_ESTIMATED_BYTES=20, BACKUP_TIMEOUT_SECONDS=0), contextlib.redirect_stdout(output):
                 result = guardian.main()
             self.assertEqual(result, 3)
-            self.assertEqual(json.loads(output.getvalue())["status"], "backup_timeout")
+            self.assertEqual(json.loads(output.getvalue().splitlines()[0])["status"], "backup_timeout")
             self.assertEqual(backup.read_bytes(), original)
             with contextlib.closing(sqlite3.connect(database)) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM logs").fetchone()[0], 2)
