@@ -2,16 +2,16 @@
 
 日常运行与配置提示词见 [README](../README.md)。本页集中说明维护规则和注意事项。
 
-## 清理范围（v1.2.0 起）
+## 清理范围
 
-两类本地诊断日志都会维护，不再只清理 Codex 数据库：
+同时维护两类本地诊断日志：
 
 | 日志 | 位置与规则 |
 | --- | --- |
 | ChatGPT / Codex 模式共用的桌面应用日志 | `%LOCALAPPDATA%\Codex\Logs` 及 `Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\Codex\Logs` 映射路径；仅处理年/月/日目录下的 `codex-desktop-*.log`，相同文件去重 |
 | Codex 诊断数据库 | `.codex\logs_2.sqlite`，沿用下文 SQLite 清理规则 |
 
-应用日志位置与命名已核对本机 ChatGPT.exe 26.1027.3384.0 的日志实现；名称仍含 Codex，但它是桌面程序共用的日志器，不代表只记录 Codex 模式。只处理电脑上实际存在的本地诊断日志，无法清理服务器端日志。
+应用日志位置与命名已核对本机 ChatGPT 桌面程序的日志实现；名称仍含 Codex，但它是桌面程序共用的日志器，不代表只记录 Codex 模式。只处理电脑上实际存在的本地诊断日志，无法清理服务器端日志。
 
 应用日志默认保留最近 7 天；总量超过 50 MiB 时，优先清理较旧文件。当天文件和最近 24 小时内写入的文件保留，正在写入或备份后发生变化的文件跳过，所以该预算不是硬上限。
 
@@ -40,7 +40,7 @@
 3. 多实例策略选择“不启动新实例”。根据实际磁盘速度设置任务整体运行时限，例如 5 分钟；强制结束可能留下临时文件，下次运行在确认有效备份后会尝试清理。
 4. 初次排错优先用 `python.exe` 手动运行以查看 JSON 摘要；`pythonw.exe` 不显示控制台。
 
-旧脚本 `codex_log_guardian.py` 现更名为 `chatgpt_log_guardian.py`。升级时检查任务仍指向正确的脚本及 Python，避免旧、新脚本重复运行。为兼容旧部署，默认备份名 `codex-log-backup-latest.sqlite`、锁文件名 `codex-log-guardian.lock` 和任务示例名 `Codex Log Maintenance` 保持不变。此处是配置说明，不会在下载或测试时自动创建任务。
+配置任务时检查脚本及 Python 路径，避免重复运行。默认备份名 `codex-log-backup-latest.sqlite`、锁文件名 `codex-log-guardian.lock`，任务示例名为 `Codex Log Maintenance`。此处是配置说明，不会在下载或测试时自动创建任务。
 
 ## 默认策略
 
@@ -97,4 +97,4 @@ py -3 -m unittest discover -s tests -p "test_*.py" -v
 
 测试使用独立的临时测试数据库，覆盖清理前备份、最新记录保留、其他表保持不变、锁互斥与固定大小、备份超时、WAL 繁忙报告、删除条数及公开路径。不会运行维护逻辑去清理你的真实日志库。
 
-历史变更见 [CHANGELOG.md](../CHANGELOG.md)，发布说明见 [Releases](https://github.com/Needy1100/chatgpt-log-guardian/releases)。许可证：[MIT](../LICENSE)。
+[下载脚本](https://github.com/Needy1100/chatgpt-log-guardian/releases/latest) · [MIT 许可证](../LICENSE)
