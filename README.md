@@ -1,67 +1,49 @@
-# ChatGPT Log Guardian
+# ChatGPT 日志清理工具（ChatGPT Log Guardian）
 
-## 清理 ChatGPT 桌面端日志，帮助节省磁盘空间
+清理 Windows 上 ChatGPT 桌面端积累的旧诊断日志，帮助节省磁盘空间。覆盖 ChatGPT 和 Codex 模式共用的桌面日志，以及 Codex 诊断数据库。
 
-这个脚本用来清理 Windows 上 ChatGPT 桌面端积累的旧诊断日志。它处理 ChatGPT 和 Codex 模式共用的桌面日志，也维护 Codex 的诊断数据库。清理前会生成并验证备份。
+[下载脚本](https://github.com/Needy1100/chatgpt-log-guardian/releases/latest) · [快速开始](#快速开始) · [自动清理](#自动清理) · [详细说明](docs/DETAILS.md)
 
-脚本的清理范围限于本机诊断日志，正式聊天历史、长期记忆和项目文件不在范围内。
+## 快速开始
 
-## 第一次使用
+需要 **Windows 和 Python 3.10 或更新版本**，无需安装第三方库。
 
-1. 准备 **Windows 和 Python 3.10 或更新版本**。无需安装第三方 Python 库。在 PowerShell 中运行 `py -3 --version` 检查版本。
-2. 从 [下载页](https://github.com/Needy1100/chatgpt-log-guardian/releases/latest) 下载 `chatgpt_log_guardian.py`，放到一个固定、可写的文件夹。脚本会把备份也放在这里。
-3. 在该文件夹内打开 PowerShell，运行下面的命令。
+1. 在 PowerShell 中运行 `py -3 --version`，确认 Python 版本。
+2. 从 [发布页](https://github.com/Needy1100/chatgpt-log-guardian/releases/latest) 下载 `chatgpt_log_guardian.py`，放在固定、可写的文件夹。
+3. 在这个文件夹打开 PowerShell，运行下方命令。
 
 ```powershell
 py -3 .\chatgpt_log_guardian.py
 ```
 
-如果电脑没有 `py` 命令，但 `python --version` 显示 Python 3.10 或更新版本，可以改用 `python .\chatgpt_log_guardian.py`。
+如果 `py` 不可用，但 `python --version` 显示符合要求，可以用 `python .\chatgpt_log_guardian.py`。
 
-**运行一次，维护一次，完成后退出。** 首次运行也可能清理符合条件的旧日志。
+脚本每次运行完成后自动退出。首次运行也可能清理符合条件的旧日志。
 
-## 怎么看运行结果
+## 查看结果和备份
 
-通常会看到两行 JSON 摘要，分别对应诊断数据库和桌面日志。摘要显示状态、大小或删除数量。
+正常运行会分别输出数据库和桌面日志的状态、大小及删除数量摘要。`deleted_rows` 或 `deleted_files` 为 `0` 表示本轮对应部分没有删除内容。遇到 `missing_database` 或 `busy`，可查阅 [状态说明](docs/DETAILS.md#输出与退出码)。
 
-| 看到什么 | 表示什么 |
-| --- | --- |
-| `deleted_rows` 或 `deleted_files` 为 `0` | 本轮相应部分没有删除记录或文件。 |
-| `backup` 为 `null` | 本轮相应部分没有生成新备份。 |
-| `missing_database` | 没有在预期位置找到诊断数据库。桌面日志仍会单独检查。 |
-| `busy` 或 `checkpoint_busy` | 有文件被占用或发生变化，或数据库的 WAL 空间暂时未能回收。 |
+脚本会先备份并校验，再清理旧日志。备份和脚本在同一文件夹，每类保留一份。
 
-需要清理时，脚本会在同一文件夹按类型各保留一份最新的已验证备份。
+- `desktop-log-backup-latest.zip` 是被选中清理的桌面日志备份。
+- `codex-log-backup-latest.sqlite` 是维护前的诊断数据库快照。
 
-- 桌面日志备份为 `desktop-log-backup-latest.zip`。
-- 诊断数据库备份为 `codex-log-backup-latest.sqlite`。
+> [!NOTE]
+> 清理范围限于本机诊断日志，正式聊天历史、长期记忆和项目文件不在范围内。日常检查通常很快，资源占用较低。需要备份或压缩大量日志时，耗时和临时磁盘占用可能增加。
 
-备份只覆盖最近一次对应类型的清理批次或维护前快照。需要恢复时，请先查看 [详细说明](docs/DETAILS.md#安全与隐私边界)。
+## 自动清理
 
-## 设置自动清理
+手动运行正常后，可用 Windows 任务计划程序每 30 分钟运行一次。要暂停，在任务计划程序中禁用对应任务。
 
-手动运行正常后，可以用 Windows 任务计划程序每 30 分钟运行一次。建议用当前用户权限，单次最多运行 5 分钟，上一轮还在运行时跳过新一轮。要暂停，在任务计划程序里禁用对应任务。
-
-可以按 [手动配置步骤](docs/DETAILS.md#配置自动运行) 操作，也可以把下面这段提示词复制给 ChatGPT。
-
-
-### 复制给 ChatGPT 的配置提示词
-
-需要使用具备本机文件和终端权限的 ChatGPT/Codex。没有本机权限时，请让它提供手动操作步骤。
+可以按 [手动配置步骤](docs/DETAILS.md#配置自动运行) 操作，或将下方提示词复制给具有本机文件和终端权限的 ChatGPT/Codex。
 
 ```text
 请帮我部署 https://github.com/Needy1100/chatgpt-log-guardian 发布页中的脚本。
-先阅读 README 和详细说明，确认实际诊断日志库的位置、结构及 Python 环境。
-把脚本放在固定的可写目录，配置每 30 分钟运行一次的当前用户计划任务；
-避免重复任务，不使用最高权限，整轮运行时限设为 5 分钟。
-确认清理前备份可校验，验证脚本运行结果及任务配置，再告诉我如何暂停。
-只处理本项目诊断日志，不修改系统文件、聊天历史或记忆存储；
-不输出或上传日志正文、数据库和备份。若不兼容，停止并说明原因。
-如果你没有本机执行权限，请给我手动操作步骤，不要声称已完成部署。
+先看 README 和详细说明，确认 Python 环境、新版桌面日志实际使用的路径和数据库结构。
+把脚本放到固定的可写目录。使用当前用户的普通权限创建每 30 分钟运行一次的计划任务，设置 5 分钟运行上限，上一轮没结束就跳过新一轮。已有任务时先检查，避免重复配置。
+验证脚本和任务配置，说明如何暂停。只处理本机诊断日志，保护系统文件、聊天历史、记忆和项目文件。只报告状态、大小和校验结果，不输出或上传日志正文、数据库或备份。
+如果环境不兼容，请说明原因并停止。如果没有本机权限，请给出手动步骤。
 ```
 
-## 更新后还能用吗？
-
-ChatGPT 桌面端大版本更新后，先确认脚本指向的是新版实际使用的诊断日志，并核对日志路径和数据库结构。兼容性检查、完整清理规则和故障处理见 [详细说明](docs/DETAILS.md)。
-
-[MIT 许可证](LICENSE)
+ChatGPT 桌面端大版本更新后，请重新核对脚本处理的日志路径和数据库结构。清理规则、兼容性和故障处理见 [详细说明](docs/DETAILS.md)。
